@@ -43,7 +43,7 @@ jobs:
           role-duration-seconds: 3600
           role-skip-session-tagging: true
       
-      - name: Clara Analytics Deployment
+      - name: Db Migration Deployment
         run: |
           export SOURCE_TABLE_MAPPING=$(cat "./tabke-mapping/migration/general.json" | jq -R '.')
           sam deploy --stack-name db-migration \
@@ -56,10 +56,10 @@ jobs:
               PrivateSubnetTwo=${PRIV_SUBNET_TWO} \
               SecurityGroupIds=${SECURITY_GROUP} \
               SourceEndpointName=postgres-source-db \
-              SourceSecretsManager= \
+              SourceSecretsManager=source-db-credential \
               SourceTableMapping=$(echo ${SOURCE_TABLE_MAPPING}) \
               DstBucketName=clara-landingzone-${ACCOUNT_REGION}-${ACCOUNT_NUMBER} \
-              DstBucketArn=arn:aws:s3:::clara-landingzone-${ACCOUNT_REGION}-${ACCOUNT_NUMBER} \
+              DstBucketArn=arn:aws:s3:::landinglayer-${ACCOUNT_REGION}-${ACCOUNT_NUMBER} \
               DstBucketFolder=db-name \
             --s3-bucket ${ARTIFACTS_BUCKET} \
             --no-fail-on-empty-changeset \
