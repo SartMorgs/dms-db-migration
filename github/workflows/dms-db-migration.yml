@@ -1,0 +1,66 @@
+name: dms-migration-pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'template/dms*'
+      - '.github/workflows/dms-db-migration.yml'
+
+jobs:
+  deploy-stage:
+    env:
+      PIPELINE_ROLE_ARN: ${{ secrets.PIPELINE_ROLE_ARN }}
+      CLOUDFORMATION_ROLE_ARN: ${{ secrets.CLOUDFORMATION_ROLE_ARN }}
+      ACCOUNT_REGION: us-east-1
+      ACCOUNT_NUMBER: ${{ secrets.ACCOUNT_NUMBER }}
+      USER_ACCESS_KEY_ID: ${{ secrets.ACCESS_KEY }}
+      USER_SECRET_KEY: ${{ secrets.SECRET_KEY }}
+      ARTIFACTS_BUCKET: cf-artifacts
+      VPC_ID: ${{ secrets.VPC }}
+      PRIV_SUBNET_ONE: ${{ secrets.PRIV_SUBNET_ONE }}
+      PRIV_SUBNET_TWO: ${{ secrets.PRIV_SUBNET_TWO }}
+      SECURITY_GROUP: ${{ secrets.SECURITY_GROUP }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - uses: actions/setup-python@v2
+      - uses: aws-actions/setup-sam@v2
+        with:
+          version: 1.59.0
+
+      - name: Assume user role
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ env.USER_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.USER_SECRET_KEY }}
+          aws-region: ${{ env.ACCOUNT_REGION }}
+          role-to-assume: ${{ env.PIPELINE_ROLE_ARN }}
+          role-session-name: deploy-db-migration
+          role-duration-seconds: 3600
+          role-skip-session-tagging: true
+      
+      - name: Clara Analytics Deployment
+        run: |
+          export SOURCE_TABLE_MAPPING=$(cat "./tabke-mapping/migration/general.json" | jq -R '.')
+          sam deploy --stack-name db-migration \
+            --template template/dms_migration.yml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region ${ACCOUNT_REGION} \
+            --parameter-overrides \
+              VPC=${VPC_ID} \
+              PrivateSubnetOne=${PRIV_SUBNET_ONE} \
+              PrivateSubnetTwo=${PRIV_SUBNET_TWO} \
+              SecurityGroupIds=${SECURITY_GROUP} \
+              SourceEndpointName=postgres-source-db \
+              SourceSecretsManager= \
+              SourceTableMapping=$(echo ${SOURCE_TABLE_MAPPING}) \
+              DstBucketName=clara-landingzone-${ACCOUNT_REGION}-${ACCOUNT_NUMBER} \
+              DstBucketArn=arn:aws:s3:::clara-landingzone-${ACCOUNT_REGION}-${ACCOUNT_NUMBER} \
+              DstBucketFolder=db-name \
+            --s3-bucket ${ARTIFACTS_BUCKET} \
+            --no-fail-on-empty-changeset \
+            --role-arn ${CLOUDFORMATION_ROLE_ARN}

@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Transform: AWS::Serverless-2016-10-31
+
+Description: "This stack template creates DMS pipeline to migrate a transaction DB to Data Lake."
+
+
+Parameters:
+  VPC:
+    Description: "VPC where to setup DMS instance."
+    Type: "AWS::EC2::VPC::Id"
+  PrivateSubnetOne:
+    Description: "Private subnet 1 id preconfigurated in the account."
+    Type: String
+  PrivateSubnetTwo:
+    Description: "Private subnet 2 id preconfigurated in the account."
+    Type: String
+  SecurityGroupIds:
+    Description: "Security Group IDs for DMS subnet group."
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  ReplicationInstanceAllocatedStorage:
+    Description: "The amount of storage (in gigabytes) to be initially allocated for the replication instance."
+    Type: Number
+    Default: 100
+  ReplicationInstanceClass:
+    Description: "The compute and memory capacity of the replication instance as specified by the replication instance class."
+    Type: String
+    Default: dms.r5.large
+    AllowedValues:
+      - dms.t3.micro
+      - dms.t3.small
+      - dms.t3.medium
+      - dms.t3.large
+      - dms.c5.large
+      - dms.c5.xlarge
+      - dms.c5.2xlarge
+      - dms.c5.4xlarge
+      - dms.c5.9xlarge
+      - dms.c5.12xlarge
+      - dms.c5.18xlarge
+      - dms.c5.24xlarge
+      - dms.r5.large
+      - dms.r5.xlarge
+      - dms.r5.2xlarge
+      - dms.r5.4xlarge
+      - dms.r5.8xlarge
+      - dms.r5.12xlarge
+      - dms.r5.16xlarge
+      - dms.r5.24xlarge 
+  SourceEndpointName:
+    Description: "Source endpoint name."
+    Type: String
+  SourceSecretsManager:
+    Description: "DB secrets manager to get credentials."
+    Type: String
+  SourceTableMapping:
+    Description: "Json table mapping for source database."
+    Type: String
+  DstBucketArn:
+    Description: "Destination S3 bucket arn."
+    Type: String
+  DstBucketName:
+    Description: "Destination S3 bucket name."
+    Type: String
+  DstBucketFolder:
+    Description: "Destination S3 folder in which the data is to written on."
+    Type: String
+
+Resources:
+  ReplicationInstanceSubnetGroup:
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties:
+      ReplicationSubnetGroupDescription: !Sub '${AWS::StackName} DMS Subnet Group'
+      SubnetIds:
+        - !Ref PrivateSubnetOne
+        - !Ref PrivateSubnetTwo
+
+  ReplicationInstance:
+    Type: AWS::DMS::ReplicationInstance
+    Properties:
+      AllocatedStorage: !Ref ReplicationInstanceAllocatedStorage
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: false
+      MultiAZ: false
+      PubliclyAccessible: false
+      ReplicationInstanceClass: !Sub '${ReplicationInstanceClass}'
+      ReplicationSubnetGroupIdentifier: !Ref ReplicationInstanceSubnetGroup
+      VpcSecurityGroupIds: !Ref SecurityGroupIds
+
+  DmsSrcEndpoint:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointIdentifier: !Ref SourceEndpointName
+      DatabaseName: !Sub '{{resolve:secretsmanager:${SourceSecretsManager}:SecretString:dbname}}'
+      EndpointType: "source"
+      EngineName: "postgres"
+      ServerName: !Sub '{{resolve:secretsmanager:${SourceSecretsManager}:SecretString:host}}'
+      Port: !Sub '{{resolve:secretsmanager:${SourceSecretsManager}:SecretString:port}}'
+      Username: !Sub '{{resolve:secretsmanager:${SourceSecretsManager}:SecretString:username}}'
+      Password: !Sub '{{resolve:secretsmanager:${SourceSecretsManager}:SecretString:password}}'
+      PostgreSqlSettings:
+        HeartbeatEnable: true
+      SslMode: require
+  
+  S3IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: 
+                - "dms.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: DMSPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              -
+                Effect: Allow
+                Action: 
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Ref DstBucketArn
+                  - !Sub "${DstBucketArn}/*"
+
+  DmsEndpointTarget:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointType: "target"
+      EngineName: "S3"
+      S3Settings:
+        BucketName: !Ref DstBucketName
+        BucketFolder: !Ref DstBucketFolder
+        ServiceAccessRoleArn: !GetAtt S3IAMRole.Arn
+        DataFormat: "parquet"
+        DatePartitionEnabled: false
+        IncludeOpForFullLoad: true
+        TimestampColumnName: "TIMESTAMP"
+  
+  DmsFullLoadReplicationTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties:
+      MigrationType: full-load
+      ReplicationInstanceArn: !Ref ReplicationInstance
+      ReplicationTaskSettings: '{
+        "TargetMetadata": {
+          "TargetSchema": "",
+          "SupportLobs": true,
+          "FullLobMode": false,
+          "LobChunkSize": 0,
+          "LimitedSizeLobMode": true,
+          "LobMaxSize": 4096,
+          "InlineLobMaxSize": 0,
+          "LoadMaxFileSize": 0,
+          "ParallelLoadThreads": 0,
+          "ParallelLoadBufferSize": 0,
+          "BatchApplyEnabled": false,
+          "TaskRecoveryTableEnabled": false,
+          "ParallelLoadQueuesPerThread": 0,
+          "ParallelApplyThreads": 0,
+          "ParallelApplyBufferSize": 0,
+          "ParallelApplyQueuesPerThread": 0
+        },
+        "FullLoadSettings": {
+          "TargetTablePrepMode": "DROP_AND_CREATE"
+        },
+        "Logging": {
+          "EnableLogging": true,
+          "LogComponents": [
+            {
+              "Id": "FILE_FACTORY",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "METADATA_MANAGER",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "SORTER",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "SOURCE_CAPTURE",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "SOURCE_UNLOAD",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "TABLES_MANAGER",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "TARGET_APPLY",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "TARGET_LOAD",
+              "Severity": "LOGGER_SEVERITY_INFO"
+            },{
+              "Id": "TASK_MANAGER",
+              "Severity": "LOGGER_SEVERITY_DEBUG"
+            },{
+              "Id": "TRANSFORMATION",
+              "Severity": "LOGGER_SEVERITY_DEBUG"
+            }
+          ],
+          "CloudWatchLogGroup": null,
+          "CloudWatchLogStream": null
+        },
+        "ChangeProcessingDdlHandlingPolicy": {
+          "HandleSourceTableDropped": false,
+          "HandleSourceTableTruncated": false,
+          "HandleSourceTableAltered": true
+        }
+      }'
+      TableMappings: !Ref SourceTableMapping
+      SourceEndpointArn: !Ref DmsSrcEndpoint
+      TargetEndpointArn: !Ref DmsEndpointTarget
+
+  DmsCdcReplicationTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties:
+      MigrationType: cdc
+      ReplicationInstanceArn: !Ref ReplicationInstance
+      ReplicationTaskSettings: '{
+        "TargetMetadata": {
+          "TargetSchema": "",
+          "SupportLobs": true,
+          "FullLobMode": false,
+          "LobChunkSize": 0,
+          "LimitedSizeLobMode": true,
+          "LobMaxSize": 4096,
+          "InlineLobMaxSize": 0,
+          "LoadMaxFileSize": 0,
+          "ParallelLoadThreads": 0,
+          "ParallelLoadBufferSize": 0,
+          "BatchApplyEnabled": false,
+          "TaskRecoveryTableEnabled": false,
+          "ParallelLoadQueuesPerThread": 0,
+          "ParallelApplyThreads": 0,
+          "ParallelApplyBufferSize": 0,
+          "ParallelApplyQueuesPerThread": 0
+        },
+        "Logging": {
+          "EnableLogging": true,
+          "LogComponents": [
+            {
+              "Id": "FILE_FACTORY",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "METADATA_MANAGER",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "SORTER",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "SOURCE_CAPTURE",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "SOURCE_UNLOAD",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "TABLES_MANAGER",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "TARGET_APPLY",
+              "Severity": "LOGGER_SEVERITY_DEFAULT"
+            },{
+              "Id": "TARGET_LOAD",
+              "Severity": "LOGGER_SEVERITY_INFO"
+            },{
+              "Id": "TASK_MANAGER",
+              "Severity": "LOGGER_SEVERITY_DEBUG"
+            },{
+              "Id": "TRANSFORMATION",
+              "Severity": "LOGGER_SEVERITY_DEBUG"
+            }
+          ],
+          "CloudWatchLogGroup": null,
+          "CloudWatchLogStream": null
+        },
+        "ChangeProcessingDdlHandlingPolicy": {
+          "HandleSourceTableDropped": false,
+          "HandleSourceTableTruncated": false,
+          "HandleSourceTableAltered": true
+        }
+      }'
+      TableMappings: !Ref SourceTableMapping
+      SourceEndpointArn: !Ref DmsSrcEndpoint
+      TargetEndpointArn: !Ref DmsEndpointTarget
